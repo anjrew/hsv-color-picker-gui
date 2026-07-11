@@ -7,7 +7,13 @@ import numpy as np
 import numpy.typing as npt
 import streamlit as st
 from PIL import Image
-from utils import apply_hsv_filter
+from utils import apply_hsv_filter, list_available_cameras
+
+
+@st.cache_data(show_spinner=False)
+def get_available_cameras() -> List[tuple[int, str]]:
+    """Cached camera enumeration so it doesn't re-run on every Streamlit rerun."""
+    return list_available_cameras()
 
 
 def main() -> None:
@@ -58,14 +64,36 @@ def main() -> None:
         image = cast(npt.NDArray[np.uint8], cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
 
     else:  # source == "Camera Feed"
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
-            st.error("Error: Unable to access the camera.")
+        if st.button("Refresh camera list"):
+            get_available_cameras.clear()
+        available_cameras: List[tuple[int, str]] = get_available_cameras()
+        if not available_cameras:
+            st.error("No cameras detected.")
             return
-        ret: bool
-        frame: cv2.typing.MatLike
-        ret, frame = cap.read()
-        if not ret:
+        selected_camera: tuple[int, str] = st.selectbox(
+            "Select camera",
+            options=available_cameras,
+            format_func=lambda camera: camera[1],
+        )
+        camera_index: int = selected_camera[0]
+        cap = cv2.VideoCapture(camera_index)
+        if not cap.isOpened():
+            st.error(
+                f"Error: Unable to access '{selected_camera[1]}'. "
+                "Try 'Refresh camera list' if you plugged/unplugged a device."
+            )
+            return
+        # Cameras often return black frames right after opening while the
+        # sensor warms up, so read a few frames and keep the last valid one.
+        ret: bool = False
+        frame: cv2.typing.MatLike = None
+        for _ in range(10):
+            ret, frame = cap.read()
+            if ret and frame is not None and cv2.countNonZero(
+                cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            ):
+                break
+        if not ret or frame is None:
             st.error("Error: Unable to capture frame from camera.")
             return
         image = cast(npt.NDArray[np.uint8], frame)
