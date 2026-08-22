@@ -1,13 +1,19 @@
 import io
 import json
-from typing import Any, List, Literal, Optional, Union, cast
+from typing import Any, List, Literal, Optional, cast
 
 import cv2
 import numpy as np
 import numpy.typing as npt
 import streamlit as st
 from PIL import Image
-from utils import apply_hsv_filter
+from utils import apply_hsv_filter, capture_frame, list_available_cameras
+
+
+@st.cache_data(show_spinner=False)
+def get_available_cameras() -> List[tuple[int, str]]:
+    """Cached camera enumeration so it doesn't re-run on every Streamlit rerun."""
+    return list_available_cameras()
 
 
 def main() -> None:
@@ -19,7 +25,6 @@ def main() -> None:
         "Select input source:", ("Upload Images", "Camera Feed")
     )
     image: Optional[npt.NDArray[np.uint8]] = None
-    cap: Union[cv2.VideoCapture, None] = None
     uploaded_files: List[Any] = []
     current_image_index: int = 0
 
@@ -53,20 +58,58 @@ def main() -> None:
             )
 
         file = uploaded_files[current_image_index]
-        pil_image = Image.open(io.BytesIO(file.read()))
+        # Use getvalue() rather than read(): Streamlit hands back the same
+        # UploadedFile on every rerun, so read() would consume the buffer once
+        # and return empty bytes on the next slider change.
+        pil_image = Image.open(io.BytesIO(file.getvalue()))
         image = np.array(pil_image.convert("RGB"), dtype=np.uint8)
         image = cast(npt.NDArray[np.uint8], cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
 
     else:  # source == "Camera Feed"
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
-            st.error("Error: Unable to access the camera.")
+        if st.button("Refresh camera list"):
+            get_available_cameras.clear()
+        available_cameras: List[tuple[int, str]] = get_available_cameras()
+        if not available_cameras:
+            st.error("No cameras detected.")
             return
-        ret: bool
-        frame: cv2.typing.MatLike
-        ret, frame = cap.read()
-        if not ret:
-            st.error("Error: Unable to capture frame from camera.")
+        selected_camera: tuple[int, str] = st.selectbox(
+            "Select camera",
+            options=available_cameras,
+            format_func=lambda camera: camera[1],
+        )
+        camera_index: int = selected_camera[0]
+
+        # macOS sometimes maps a camera name to the wrong device index, so the
+        # built-in camera's light flicks on and an iPhone Continuity Camera
+        # opens instead. This lets you try indices until the right one opens.
+        if st.checkbox("Wrong camera opens? Set the index manually"):
+            camera_index = int(
+                st.number_input(
+                    "Camera index",
+                    min_value=0,
+                    max_value=10,
+                    value=int(camera_index),
+                    step=1,
+                    key="camera_index_override",
+                    help="Try 0, 1, 2… until the built-in camera's light stays "
+                    "on and you get a live image.",
+                )
+            )
+
+        frame, error = capture_frame(camera_index)
+        if error == "unopened":
+            st.error(
+                f"Unable to access camera index {camera_index}. Try a different "
+                "index, or 'Refresh camera list' if you plugged/unplugged a "
+                "device."
+            )
+            return
+        if error == "black":
+            st.error(
+                "The camera opened but only returned black frames — it may "
+                "still be waking up. Try again, or pick a different camera "
+                "index above."
+            )
             return
         image = cast(npt.NDArray[np.uint8], frame)
 
@@ -122,9 +165,6 @@ def main() -> None:
             file_name="hsv_values.json",
             mime="application/json",
         )
-
-    if cap is not None:
-        cap.release()
 
 
 if __name__ == "__main__":
